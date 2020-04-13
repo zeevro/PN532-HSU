@@ -28,6 +28,10 @@ import binascii
 
 import PN532
 
+
+CARD_KEY = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('com_port')
@@ -60,7 +64,7 @@ def main():
 
         # Authenticate block 4 for reading with default key (0xFFFFFFFFFFFF).
         for i in range(16):
-            if not pn532.mifare_classic_authenticate_block(uid, i, PN532.MIFARE_CMD_AUTH_B, [0xFF] * 6):
+            if not pn532.mifare_classic_authenticate_block(uid, i, PN532.MIFARE_CMD_AUTH_B, CARD_KEY):
                 print('Failed to authenticate block {}'.format(i))
                 break
 
