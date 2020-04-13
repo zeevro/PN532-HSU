@@ -140,36 +140,37 @@ PN532_GPIO_P33                      = 3
 PN532_GPIO_P34                      = 4
 PN532_GPIO_P35                      = 5
 
-PN532_ACK_STRING                    = "0000ff00ff00"
-PN532_ACK_FRAME                     = "\x00\x00\xFF\x00\xFF\x00"
+PN532_ACK_FRAME                     = b'\x00\x00\xFF\x00\xFF\x00'
 
 
 def millis():
-    return int(round(time.time() * 1000))
+    return int(time.time() * 1000)
 
-class PN532(object):
 
-    def __init__(self, uart_port = "COM5", uart_baudrate = 115200):
+class PN532:
+    def __init__(self, comport, baudrate=115200):
         self.status = False
-        self.message = ""
+        self.message = b''
 
-        print "Port:"+uart_port
+        print("Port: {}".format(comport))
         try:
-            self.ser = serial.Serial(uart_port, uart_baudrate)
-            self.ser.timeout=2;
+            self.ser = serial.Serial(comport, baudrate)
+            self.ser.timeout = 2
             self.status = True
         except serial.SerialException:
-            print "Opening port error."
+            print("Opening port error.")
             self.status = False
 
-    def _uint8_add(self, a, b):
+    @staticmethod
+    def _uint8_add(a, b):
         """Add add two values as unsigned 8-bit values."""
         return ((a & 0xFF) + (b & 0xFF)) & 0xFF
 
-    def _busy_wait_ms(self, ms):
+    @staticmethod
+    def _busy_wait_ms(ms):
         """Busy wait for the specified number of milliseconds."""
         start = time.time()
-        delta = ms/1000.0
+        delta = ms / 1000.0
         while (time.time() - start) <= delta:
             pass
 
@@ -186,7 +187,7 @@ class PN532(object):
         # - Checksum
         # - Postamble (0x00)
         length = len(data)
-        frame = bytearray(length+7)
+        frame = bytearray(length + 7)
         frame[0] = PN532_PREAMBLE
         frame[1] = PN532_STARTCODE1
         frame[2] = PN532_STARTCODE2
@@ -196,46 +197,42 @@ class PN532(object):
         checksum = reduce(self._uint8_add, data, 0xFF)
         frame[-2] = ~checksum & 0xFF
         frame[-1] = PN532_POSTAMBLE
-        # Send frame.
+        # Send frame
         self.ser.flushInput()
-        while(not ack):
+        while not ack:
             self.ser.write(frame)
             ack = self._ack_wait(1000)
             time.sleep(0.3)
         return ack
 
-
     def _ack_wait(self, timeout):
-        ack=False
-        rx_info=""
+        ack = False
+        rx_info = b''
         start_time = millis()
         current_time = start_time
-        while((current_time - start_time) < timeout and not ack):
-            time.sleep(0.12)#Stability on receive
+
+        while (current_time - start_time < timeout) and not ack:
+            time.sleep(0.12)  # Stability on receive
             rx_info += self.ser.read(self.ser.inWaiting())
             current_time = millis()
-            if (PN532_ACK_STRING in rx_info.encode("hex")):
-                ack = True
-        if(ack):
-            if(len(rx_info)>6):
-                rx_info=rx_info.split(PN532_ACK_FRAME)
-                self.message = ''.join(rx_info)
-            else:
-                self.message = rx_info
-            self.ser.flush()
-            return ack
-        else:
-            self.message = ""
-            return ack
+            if PN532_ACK_FRAME in rx_info:
+                if len(rx_info) > 6:
+                    self.message = b''.join(rx_info.split(PN532_ACK_FRAME))
+                else:
+                    self.message = rx_info
+                self.ser.flush()
+                return True
+
+        self.message = b''
+        return False
 
     def _read_data(self, count):
         timeout = 1000
-        rx_info=""
-        if(self.message == ""):
+        rx_info = b''
+        if not self.message:
             self._ack_wait(1000)
         else:
             rx_info = self.message
-        rx_info = array.array('B',rx_info)
         return rx_info
 
     def _read_frame(self, length):
@@ -245,12 +242,13 @@ class PN532(object):
         might be returned!
         """
         # Read frame with expected length of data.
-        response = self._read_data(length+8)
-        # Check frame starts with 0x01 and then has 0x00FF (preceeded by optional
-        # zeros).
-        if not (PN532_ACK_FRAME == response.tostring()):
+        response = self._read_data(length + 8)
+
+        # Check frame starts with 0x01 and then has 0x00FF (preceeded by optional zeros).
+        if response != PN532_ACK_FRAME:
             if response[0] != 0x00:
-                raise RuntimeError('Response frame does not start with 0x01!')
+                raise RuntimeError('Response frame does not start with 0x00!')
+
             # Swallow all the 0x00 values that preceed 0xFF.
             offset = 1
             while response[offset] == 0x00:
@@ -261,23 +259,25 @@ class PN532(object):
                 raise RuntimeError('Response frame preamble does not contain 0x00FF!')
             offset += 1
             if offset >= len(response):
-                    raise RuntimeError('Response contains no data!')
+                raise RuntimeError('Response contains no data!')
+
             # Check length & length checksum match.
             frame_len = response[offset]
-            if (frame_len + response[offset+1]) & 0xFF != 0:
+            if (frame_len + response[offset + 1]) & 0xFF:
                 raise RuntimeError('Response length checksum did not match length!')
+
             # Check frame checksum value matches bytes.
-            checksum = reduce(self._uint8_add, response[offset+2:offset+2+frame_len+1], 0)
-            if checksum != 0:
+            checksum = reduce(self._uint8_add, response[offset + 2:offset + 2 + frame_len + 1], 0)
+            if checksum:
                 raise RuntimeError('Response checksum did not match expected value!')
+
             # Return frame data.
             return response[offset+2:offset+2+frame_len]
-        else:
-            return "no_card"
+
+        return "no_card"
 
     def wakeup(self):
-        msg = '\x55\x55\x00\x00\x00'
-        self.ser.write(msg)
+        self.ser.write(b'\x55\x55\x00\x00\x00')
 
     def call_function(self, command, response_length=0, params=[], timeout_sec=1):
         """Send specified command to the PN532 and expect up to response_length
@@ -288,23 +288,27 @@ class PN532(object):
         response is available within the timeout.
         """
         # Build frame data with command and parameters.
-        data = bytearray(2+len(params))
-        data[0]  = PN532_HOSTTOPN532
-        data[1]  = command & 0xFF
+        data = bytearray(2 + len(params))
+        data[0] = PN532_HOSTTOPN532
+        data[1] = command & 0xFF
         data[2:] = params
+
         # Send frame and wait for response.
         if not self._write_frame(data):
             return None
+
         # Read response bytes.
-        response = self._read_frame(response_length+2)
+        response = self._read_frame(response_length + 2)
+
         # Check that response is for the called function.
-        if not (response == "no_card"):
-            if not (response[0] == PN532_PN532TOHOST and response[1] == (command+1)):
+        if response != "no_card":
+            if response[0] != PN532_PN532TOHOST or response[1] != command + 1:
                 raise RuntimeError('Received unexpected command response!')
+
             # Return response data.
             return response[2:]
-        else:
-            return response
+
+        return response
 
     def begin(self):
         """Initialize communication with the PN532.  Must be called before any
@@ -343,17 +347,17 @@ class PN532(object):
         # If no response is available return None to indicate no card is present.
         if response is None:
             return None
-        if not (response == "no_card"):
+
+        if response != "no_card":
             # Check only 1 card with up to a 7 byte UID is present.
             if response[0] != 0x01:
                 raise RuntimeError('More than one card detected!')
             if response[5] > 7:
                 raise RuntimeError('Found card with unexpectedly long UID!')
             # Return UID of card.
-            return response[6:6+response[5]]
-        else:
-            return response
+            return response[6:6 + response[5]]
 
+        return response
 
     def mifare_classic_authenticate_block(self, uid, block_number, key_number, key):
         """Authenticate specified block number for a MiFare classic card.  Uid
@@ -364,14 +368,13 @@ class PN532(object):
         if not authenticated.
         """
         # Build parameters for InDataExchange command to authenticate MiFare card.
-        uidlen = len(uid)
         keylen = len(key)
-        params = bytearray(3+uidlen+keylen)
+        params = bytearray(3 + len(uid) + keylen)
         params[0] = 0x01  # Max card numbers
         params[1] = key_number & 0xFF
         params[2] = block_number & 0xFF
-        params[3:3+keylen] = key
-        params[3+keylen:]  = uid
+        params[3:3 + keylen] = key
+        params[3 + keylen:]  = uid
         # Send InDataExchange request and verify response is 0x00.
         response = self.call_function(PN532_COMMAND_INDATAEXCHANGE,
                                       params=params,
