@@ -23,12 +23,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import binascii
-import array
-from functools import reduce
 import time
+from functools import reduce
+
 import serial
 
+
+# pylint: disable=bad-whitespace
 PN532_PREAMBLE                      = 0x00
 PN532_STARTCODE1                    = 0x00
 PN532_STARTCODE2                    = 0xFF
@@ -141,43 +142,47 @@ PN532_GPIO_P34                      = 4
 PN532_GPIO_P35                      = 5
 
 PN532_ACK_FRAME                     = b'\x00\x00\xFF\x00\xFF\x00'
-
+# pylint: enable=bad-whitespace
 
 def millis():
     return int(time.time() * 1000)
 
 
+def uint8_add(a, b):
+    return ((a & 0xFF) + (b & 0xFF)) & 0xFF
+
+
+def canonicalize_params(params, ignore_errors=False):
+    if not params:
+        return []
+
+    ret = []
+    for i, param in enumerate(params, 1):
+        if isinstance(param, (list, tuple)):
+            ret += canonicalize_params(param)
+        elif isinstance(param, bytes):
+            ret += list(param)
+        elif isinstance(param, str):
+            ret += list(param.encode())
+        elif isinstance(param, int):
+            ret.append(param & 0xFF)
+        elif not ignore_errors:
+            raise ValueError('Param #{} is of unsupported type: {}'.format(i, type(param)))
+
+    return ret
+
 class PN532:
     def __init__(self, comport, baudrate=115200):
-        self.status = False
         self.message = b''
 
-        print("Port: {}".format(comport))
-        try:
-            self.ser = serial.Serial(comport, baudrate)
-            self.ser.timeout = 2
-            self.status = True
-        except serial.SerialException:
-            print("Opening port error.")
-            self.status = False
+        self.ser = serial.Serial(comport, baudrate)
+        self.ser.timeout = 2
 
     @staticmethod
-    def _uint8_add(a, b):
-        """Add add two values as unsigned 8-bit values."""
-        return ((a & 0xFF) + (b & 0xFF)) & 0xFF
-
-    @staticmethod
-    def _busy_wait_ms(ms):
-        """Busy wait for the specified number of milliseconds."""
-        start = time.time()
-        delta = ms / 1000.0
-        while (time.time() - start) <= delta:
-            pass
+    def checksum(data):
+        return ~reduce(uint8_add, data, 0xFF) & 0xFF
 
     def _write_frame(self, data):
-        ack = False
-        """Write a frame to the PN532 with the specified data bytearray."""
-        assert data is not None and 0 < len(data) < 255, 'Data must be array of 1 to 255 bytes.'
         # Build frame to send as:
         # - Preamble (0x00)
         # - Start code  (0x00, 0xFF)
@@ -186,34 +191,40 @@ class PN532:
         # - Command bytes
         # - Checksum
         # - Postamble (0x00)
+
+        assert 0 < len(data) < 255, 'Data must be array of 1 to 255 bytes.'
+
         length = len(data)
-        frame = bytearray(length + 7)
-        frame[0] = PN532_PREAMBLE
-        frame[1] = PN532_STARTCODE1
-        frame[2] = PN532_STARTCODE2
-        frame[3] = length & 0xFF
-        frame[4] = self._uint8_add(~length, 1)
-        frame[5:-2] = data
-        checksum = reduce(self._uint8_add, data, 0xFF)
-        frame[-2] = ~checksum & 0xFF
-        frame[-1] = PN532_POSTAMBLE
-        # Send frame
+        frame = bytes([
+            PN532_PREAMBLE,
+            PN532_STARTCODE1,
+            PN532_STARTCODE2,
+            length & 0xFF,
+            uint8_add(~length, 1)
+        ]) + data + bytes([
+            self.checksum(data),
+            PN532_POSTAMBLE
+        ])
+
         self.ser.flushInput()
+        ack = False
         while not ack:
             self.ser.write(frame)
+            # print('>', frame)
             ack = self._ack_wait(1000)
             time.sleep(0.3)
-        return ack
+        return True
 
     def _ack_wait(self, timeout):
-        ack = False
         rx_info = b''
         start_time = millis()
         current_time = start_time
 
-        while (current_time - start_time < timeout) and not ack:
+        while (current_time - start_time < timeout):
             time.sleep(0.12)  # Stability on receive
-            rx_info += self.ser.read(self.ser.inWaiting())
+            buf = self.ser.read(self.ser.inWaiting())
+            # print('<', buf)
+            rx_info += buf
             current_time = millis()
             if PN532_ACK_FRAME in rx_info:
                 if len(rx_info) > 6:
@@ -226,8 +237,7 @@ class PN532:
         self.message = b''
         return False
 
-    def _read_data(self, count):
-        timeout = 1000
+    def _read_data(self):
         rx_info = b''
         if not self.message:
             self._ack_wait(1000)
@@ -235,14 +245,14 @@ class PN532:
             rx_info = self.message
         return rx_info
 
-    def _read_frame(self, length):
+    def _read_frame(self):
         """Read a response frame from the PN532 of at most length bytes in size.
         Returns the data inside the frame if found, otherwise raises an exception
         if there is an error parsing the frame.  Note that less than length bytes
         might be returned!
         """
         # Read frame with expected length of data.
-        response = self._read_data(length + 8)
+        response = self._read_data()
 
         # Check frame starts with 0x01 and then has 0x00FF (preceeded by optional zeros).
         if response != PN532_ACK_FRAME:
@@ -267,7 +277,7 @@ class PN532:
                 raise RuntimeError('Response length checksum did not match length!')
 
             # Check frame checksum value matches bytes.
-            checksum = reduce(self._uint8_add, response[offset + 2:offset + 2 + frame_len + 1], 0)
+            checksum = reduce(uint8_add, response[offset + 2:offset + 2 + frame_len + 1], 0)
             if checksum:
                 raise RuntimeError('Response checksum did not match expected value!')
 
@@ -279,7 +289,7 @@ class PN532:
     def wakeup(self):
         self.ser.write(b'\x55\x55\x00\x00\x00')
 
-    def call_function(self, command, response_length=0, params=[], timeout_sec=1):
+    def call_function(self, command, *params):
         """Send specified command to the PN532 and expect up to response_length
         bytes back in a response.  Note that less than the expected bytes might
         be returned!  Params can optionally specify an array of bytes to send as
@@ -287,18 +297,17 @@ class PN532:
         for a response and return a bytearray of response bytes, or None if no
         response is available within the timeout.
         """
+        params = canonicalize_params(params)
+
         # Build frame data with command and parameters.
-        data = bytearray(2 + len(params))
-        data[0] = PN532_HOSTTOPN532
-        data[1] = command & 0xFF
-        data[2:] = params
+        data = bytes([PN532_HOSTTOPN532, command & 0xFF] + params)
 
         # Send frame and wait for response.
         if not self._write_frame(data):
             return None
 
         # Read response bytes.
-        response = self._read_frame(response_length + 2)
+        response = self._read_frame()
 
         # Check that response is for the called function.
         if response != "no_card":
@@ -320,7 +329,7 @@ class PN532:
         """Call PN532 GetFirmwareVersion function and return a tuple with the IC,
         Ver, Rev, and Support values.
         """
-        response = self.call_function(PN532_COMMAND_GETFIRMWAREVERSION, 4)
+        response = self.call_function(PN532_COMMAND_GETFIRMWAREVERSION)
         if response is None:
             raise RuntimeError('Failed to detect the PN532!  Make sure there is sufficient power (use a 1 amp or greater power supply), the PN532 is wired correctly to the device, and the solder joints on the PN532 headers are solidly connected.')
         return (response[0], response[1], response[2], response[3])
@@ -333,17 +342,21 @@ class PN532:
         # - 0x01, use IRQ pin
         # Note that no other verification is necessary as call_function will
         # check the command was executed as expected.
-        self.call_function(PN532_COMMAND_SAMCONFIGURATION, params=[0x01, 0x14, 0x01])
+        self.call_function(PN532_COMMAND_SAMCONFIGURATION, [0x01, 0x14, 0x01])
 
-    def read_passive_target(self, card_baud=PN532_MIFARE_ISO14443A, timeout_sec=1):
+    def read_passive_target(self, card_baud=PN532_MIFARE_ISO14443A):
         """Wait for a MiFare card to be available and return its UID when found.
         Will wait up to timeout_sec seconds and return None if no card is found,
         otherwise a bytearray with the UID of the found card is returned.
         """
-        # Send passive read command for 1 card.  Expect at most a 7 byte UUID.
-        response = self.call_function(PN532_COMMAND_INLISTPASSIVETARGET,
-                                      params=[0x01, card_baud],
-                                      response_length=17)
+
+        # Send passive read command for 1 card.
+        response = self.call_function(
+            PN532_COMMAND_INLISTPASSIVETARGET,
+            1,  # amount of cards
+            card_baud
+        )
+
         # If no response is available return None to indicate no card is present.
         if response is None:
             return None
@@ -367,18 +380,17 @@ class PN532:
         with the key data.  Returns True if the block was authenticated, or False
         if not authenticated.
         """
-        # Build parameters for InDataExchange command to authenticate MiFare card.
-        keylen = len(key)
-        params = bytearray(3 + len(uid) + keylen)
-        params[0] = 0x01  # Max card numbers
-        params[1] = key_number & 0xFF
-        params[2] = block_number & 0xFF
-        params[3:3 + keylen] = key
-        params[3 + keylen:]  = uid
+
         # Send InDataExchange request and verify response is 0x00.
-        response = self.call_function(PN532_COMMAND_INDATAEXCHANGE,
-                                      params=params,
-                                      response_length=1)
+        response = self.call_function(
+            PN532_COMMAND_INDATAEXCHANGE,
+            1,  # Max card numbers
+            key_number,
+            block_number,
+            key,
+            uid,
+        )
+
         return response[0] == 0x00
 
     def mifare_classic_read_block(self, block_number):
@@ -387,31 +399,38 @@ class PN532:
         data starting at the specified block will be returned.  If the block is
         not read then None will be returned.
         """
+
         # Send InDataExchange request to read block of MiFare data.
-        response = self.call_function(PN532_COMMAND_INDATAEXCHANGE,
-                                      params=[0x01, MIFARE_CMD_READ, block_number & 0xFF],
-                                      response_length=17)
+        response = self.call_function(
+            PN532_COMMAND_INDATAEXCHANGE,
+            1,
+            MIFARE_CMD_READ,
+            block_number,
+        )
+
         # Check first response is 0x00 to show success.
         if response[0] != 0x00:
             return None
+
         # Return first 4 bytes since 16 bytes are always returned.
         return response[1:]
 
-    def mifare_classic_write_block(self, block_number, data):
+    def mifare_classic_write_block(self, block_number: int, data: bytes):
         """Write a block of data to the card.  Block number should be the block
         to write and data should be a byte array of length 16 with the data to
         write.  If the data is successfully written then True is returned,
         otherwise False is returned.
         """
-        assert data is not None and len(data) == 16, 'Data must be an array of 16 bytes!'
-        # Build parameters for InDataExchange command to do MiFare classic write.
-        params = bytearray(19)
-        params[0] = 0x01  # Max card numbers
-        params[1] = MIFARE_CMD_WRITE
-        params[2] = block_number & 0xFF
-        params[3:] = data
+
+        assert len(data) == 16, 'Data must be an array of 16 bytes!'
+
         # Send InDataExchange request.
-        response = self.call_function(PN532_COMMAND_INDATAEXCHANGE,
-                                      params=params,
-                                      response_length=1)
+        response = self.call_function(
+            PN532_COMMAND_INDATAEXCHANGE,
+            1,  # Max card numbers
+            MIFARE_CMD_WRITE,
+            block_number,
+            data,
+        )
+
         return response[0] == 0x00

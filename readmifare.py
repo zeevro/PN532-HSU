@@ -25,17 +25,26 @@
 
 import argparse
 import binascii
+import string
 
 import PN532
+
+
+CHARS_TO_PRINT = set(string.printable) - set(string.whitespace)
+REPLACEMENT_CHAR = '.'
 
 
 CARD_KEY = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 
 
+def printable(s):
+    return ''.join((c if c in CHARS_TO_PRINT else REPLACEMENT_CHAR) for c in s)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('com_port')
-    args = p.parse_args()
+    args = p.parse_args(['COM5'])
 
     # Create an instance of the PN532 class.
     pn532 = PN532.PN532(args.com_port, 115200)
@@ -75,7 +84,7 @@ def main():
                 continue
             # Note that 16 bytes are returned, so only show the first 4 bytes for the block.
 
-            print("Block {:>2}: {} : {}".format(i, binascii.hexlify(data).decode(), data))
+            print("Block {:>2}: {} : {}".format(i, binascii.hexlify(data).decode(), printable(data.decode('latin1'))))
 
 
 if __name__ == "__main__":
